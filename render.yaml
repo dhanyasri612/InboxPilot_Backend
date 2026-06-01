@@ -1,0 +1,11 @@
+services:
+  - type: web
+    name: inboxpilot-backend
+    runtime: python
+    buildCommand: pip install -r requirements.txt
+    startCommand: uvicorn backend.main:app --host 0.0.0.0 --port $PORT
+    envVars:
+      - key: FRONTEND_URL
+        value: https://inboxpilot-beta.vercel.app
+      - key: GMAIL_OAUTH_REDIRECT_URI
+        value: https://inboxpilot-backend-0dxx.onrender.com/gmail/oauth/callback

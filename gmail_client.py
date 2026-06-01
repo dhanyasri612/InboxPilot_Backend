@@ -58,6 +58,46 @@ FETCH_RANGES = {
 _oauth_states = {}
 
 
+def _credentials_json_from_env() -> str | None:
+    raw = (os.getenv("GMAIL_CREDENTIALS_JSON") or "").strip()
+    return raw or None
+
+
+def ensure_credentials_file() -> bool:
+    """
+  Make credentials.json available for OAuth.
+
+  On Render/Railway, set GMAIL_CREDENTIALS_JSON to the full JSON from Google Cloud
+  (single line or minified). Locally you can keep a credentials.json file instead.
+    """
+    if CREDENTIALS_PATH.is_file():
+        return True
+
+    raw = _credentials_json_from_env()
+    if not raw:
+        return False
+
+    try:
+        json.loads(raw)
+    except json.JSONDecodeError as error:
+        raise ValueError("GMAIL_CREDENTIALS_JSON is not valid JSON") from error
+
+    CREDENTIALS_PATH.write_text(raw, encoding="utf-8")
+    return True
+
+
+def credentials_configured() -> bool:
+    return CREDENTIALS_PATH.is_file() or bool(_credentials_json_from_env())
+
+
+def _require_credentials_file():
+    if not ensure_credentials_file():
+        raise FileNotFoundError(
+            "Gmail OAuth credentials are not configured. "
+            "Add credentials.json on the server or set GMAIL_CREDENTIALS_JSON."
+        )
+
+
 def get_fetch_options():
     return list(FETCH_RANGES.values())
 
@@ -169,11 +209,7 @@ def get_last_fetch_meta():
 
 
 def run_cli_oauth():
-    if not CREDENTIALS_PATH.is_file():
-        raise FileNotFoundError(
-            f"Missing credentials.json at {CREDENTIALS_PATH}. "
-            "Download OAuth client credentials from Google Cloud Console."
-        )
+    _require_credentials_file()
 
     _enable_local_insecure_transport_if_needed()
     flow = InstalledAppFlow.from_client_secrets_file(str(CREDENTIALS_PATH), SCOPES)
@@ -183,8 +219,7 @@ def run_cli_oauth():
 
 
 def start_web_oauth(next_url=None):
-    if not CREDENTIALS_PATH.is_file():
-        raise FileNotFoundError("credentials.json is not configured.")
+    _require_credentials_file()
 
     _enable_local_insecure_transport_if_needed()
 

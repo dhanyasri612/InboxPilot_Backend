@@ -1,3 +1,4 @@
+import logging
 import os
 import sys
 from pathlib import Path
@@ -24,27 +25,62 @@ from backend.services import (
     normalize_email,
 )
 
-FRONTEND_URL = os.getenv("FRONTEND_URL", "http://localhost:5173")
+logger = logging.getLogger("inboxpilot")
+logging.basicConfig(level=logging.INFO)
+
+FRONTEND_URL = os.getenv("FRONTEND_URL", "http://localhost:5173").rstrip("/")
+
+DEFAULT_CORS_ORIGINS = [
+    "https://inboxpilot-beta.vercel.app",
+    "http://localhost:5173",
+    "http://localhost:3000",
+    "http://127.0.0.1:5173",
+]
+
+
+def build_cors_origins() -> list[str]:
+    origins = list(DEFAULT_CORS_ORIGINS)
+    if FRONTEND_URL and FRONTEND_URL not in origins:
+        origins.append(FRONTEND_URL)
+
+    extra = os.getenv("CORS_ORIGINS", "")
+    for origin in extra.split(","):
+        cleaned = origin.strip().rstrip("/")
+        if cleaned and cleaned not in origins:
+            origins.append(cleaned)
+
+    return origins
+
+
+CORS_ORIGINS = build_cors_origins()
 
 app = FastAPI(title="InboxPilot API", version="1.0.0")
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=CORS_ORIGINS,
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+
+def log_registered_routes() -> None:
+    logger.info("InboxPilot API module: backend.main:app")
+    logger.info("CORS allowed origins: %s", ", ".join(CORS_ORIGINS))
+    logger.info("Registered routes:")
+    for route in app.routes:
+        methods = getattr(route, "methods", None)
+        path = getattr(route, "path", None)
+        if methods and path:
+            method_list = sorted(methods - {"HEAD", "OPTIONS"})
+            logger.info("  %-18s %s", ",".join(method_list), path)
 
 
 @app.on_event("startup")
 def on_startup():
     init_database()
-
-
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=[
-        FRONTEND_URL,
-        "http://localhost:5173",
-        "http://127.0.0.1:5173",
-    ],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
+    log_registered_routes()
 
 
 class FetchRequest(BaseModel):
@@ -88,6 +124,35 @@ def _remove_emails_from_store(email: str | None, gmail_ids: set[str]):
     delete_emails_for_user(normalize_email(email), gmail_ids)
 
 
+def _gmail_profile_payload() -> dict:
+    profile = gmail_client.get_gmail_profile()
+    if not profile:
+        return {
+            "email": "",
+            "emailAddress": "",
+            "connected": False,
+        }
+
+    address = profile.get("emailAddress") or ""
+    return {
+        "email": address,
+        "emailAddress": address,
+        "connected": True,
+        "messagesTotal": profile.get("messagesTotal"),
+        "threadsTotal": profile.get("threadsTotal"),
+    }
+
+
+@app.get("/")
+def root():
+    return {
+        "service": "InboxPilot API",
+        "health": "/health",
+        "gmailProfile": "/gmail/profile",
+        "docs": "/docs",
+    }
+
+
 @app.get("/health")
 def health():
     return {"status": "ok"}
@@ -96,7 +161,7 @@ def health():
 @app.get("/gmail/status")
 def gmail_status(email: str | None = Query(default=None)):
     has_token = gmail_client.TOKEN_PATH.is_file()
-    has_credentials = gmail_client.CREDENTIALS_PATH.is_file()
+    has_credentials = gmail_client.credentials_configured()
     profile = None
 
     if has_token:
@@ -115,24 +180,14 @@ def gmail_status(email: str | None = Query(default=None)):
         "message": (
             "Gmail API is ready."
             if has_token
-            else "Run read_emails.py once to authorize Gmail API access."
+            else "Connect Gmail from Settings to authorize API access."
         ),
     }
 
 
 @app.get("/gmail/profile")
 def gmail_profile():
-    profile = gmail_client.get_gmail_profile()
-
-    if not profile:
-        return {"connected": False}
-
-    return {
-        "connected": True,
-        "emailAddress": profile.get("emailAddress"),
-        "messagesTotal": profile.get("messagesTotal"),
-        "threadsTotal": profile.get("threadsTotal"),
-    }
+    return _gmail_profile_payload()
 
 
 @app.post("/gmail/disconnect")
@@ -143,7 +198,9 @@ def gmail_disconnect():
 
 @app.get("/gmail/oauth/start")
 def gmail_oauth_start(next: str | None = Query(default=None)):
-    session = gmail_client.start_web_oauth(next_url=next or f"{FRONTEND_URL.rstrip('/')}/settings")
+    session = gmail_client.start_web_oauth(
+        next_url=next or f"{FRONTEND_URL}/settings"
+    )
     return RedirectResponse(session["authUrl"], status_code=302)
 
 
@@ -152,14 +209,14 @@ def gmail_oauth_callback(request: Request, state: str = Query(default="")):
     try:
         result = gmail_client.complete_web_oauth(state, str(request.url))
         profile = result.get("profile") or {}
-        next_url = result.get("next_url") or f"{FRONTEND_URL.rstrip('/')}/settings"
+        next_url = result.get("next_url") or f"{FRONTEND_URL}/settings"
         return RedirectResponse(
             f"{next_url}?gmail=connected&email={profile.get('emailAddress', '')}",
             status_code=302,
         )
     except Exception as error:
         return RedirectResponse(
-            f"{FRONTEND_URL.rstrip('/')}/settings?gmail=error&message={str(error)}",
+            f"{FRONTEND_URL}/settings?gmail=error&message={str(error)}",
             status_code=302,
         )
 
