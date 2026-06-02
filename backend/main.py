@@ -3,6 +3,8 @@ import os
 import sys
 from pathlib import Path
 
+from urllib.parse import quote
+
 from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import RedirectResponse
@@ -216,10 +218,23 @@ def gmail_oauth_config():
 
 @app.get("/gmail/oauth/start")
 def gmail_oauth_start(next: str | None = Query(default=None)):
-    session = gmail_client.start_web_oauth(
-        next_url=next or f"{FRONTEND_URL}/settings"
-    )
-    return RedirectResponse(session["authUrl"], status_code=302)
+    return_url = next or f"{FRONTEND_URL}/settings"
+
+    try:
+        session = gmail_client.start_web_oauth(next_url=return_url)
+        return RedirectResponse(session["authUrl"], status_code=302)
+    except (ValueError, FileNotFoundError) as error:
+        message = quote(str(error))
+        return RedirectResponse(
+            f"{return_url}?gmail=error&message={message}",
+            status_code=302,
+        )
+    except Exception as error:
+        message = quote(f"OAuth start failed: {error}")
+        return RedirectResponse(
+            f"{return_url}?gmail=error&message={message}",
+            status_code=302,
+        )
 
 
 @app.get("/gmail/oauth/callback")

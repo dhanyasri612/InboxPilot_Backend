@@ -21,7 +21,7 @@ CREDENTIALS_PATH = ROOT_DIR / "credentials.json"
 EMAILS_PATH = ROOT_DIR / "emails.json"
 FETCH_META_PATH = ROOT_DIR / "fetch_meta.json"
 
-FRONTEND_URL = os.getenv("FRONTEND_URL", "http://localhost:5173")
+FRONTEND_URL = os.getenv("FRONTEND_URL", "http://localhost:5173").rstrip("/")
 
 
 def resolve_oauth_redirect_uri() -> str:
@@ -142,19 +142,47 @@ def credentials_client_type() -> str | None:
     return "unknown"
 
 
-def _require_web_oauth_client():
-    """Production browser OAuth requires a Google Web application client."""
-    client_type = credentials_client_type()
-    if client_type == "installed":
-        raise ValueError(
-            "Gmail OAuth credentials are type 'installed' (Desktop). "
-            "Production requires a Google Cloud OAuth client of type 'Web application' "
-            "with redirect URI: "
-            f"{get_oauth_redirect_uri()}. "
-            "Create a Web client, download JSON, and set GMAIL_CREDENTIALS_JSON on Render."
+def _create_oauth_flow(redirect_uri: str) -> Flow:
+    """Build OAuth flow from web credentials, or adapt installed creds for local dev only."""
+    _require_credentials_file()
+    data = json.loads(CREDENTIALS_PATH.read_text(encoding="utf-8"))
+
+    if "web" in data:
+        return Flow.from_client_secrets_file(
+            str(CREDENTIALS_PATH),
+            scopes=SCOPES,
+            redirect_uri=redirect_uri,
         )
-    if client_type not in {"web", None} and client_type != "unknown":
-        raise ValueError(f"Unsupported OAuth credentials type: {client_type}")
+
+    if "installed" in data:
+        is_local = redirect_uri.startswith("http://localhost") or redirect_uri.startswith(
+            "http://127.0.0.1"
+        )
+        if not is_local:
+            raise ValueError(
+                "Gmail OAuth credentials are type 'installed' (Desktop). "
+                "Production requires a Google Cloud OAuth client of type 'Web application' "
+                f"with redirect URI: {redirect_uri}. "
+                "Create a Web client, download JSON, and set GMAIL_CREDENTIALS_JSON on Render."
+            )
+
+        installed = data["installed"]
+        web_config = {
+            "web": {
+                "client_id": installed["client_id"],
+                "client_secret": installed["client_secret"],
+                "auth_uri": installed["auth_uri"],
+                "token_uri": installed["token_uri"],
+                "redirect_uris": [redirect_uri],
+            }
+        }
+        return Flow.from_client_config(
+            web_config,
+            scopes=SCOPES,
+            redirect_uri=redirect_uri,
+        )
+
+    raise ValueError("Invalid OAuth credentials: expected 'web' or 'installed' section.")
 
 
 def get_oauth_config() -> dict:
@@ -167,6 +195,9 @@ def get_oauth_config() -> dict:
         "isLocalRedirect": redirect_uri.startswith("http://localhost")
         or redirect_uri.startswith("http://127.0.0.1"),
     }
+
+
+def get_fetch_options():
     return list(FETCH_RANGES.values())
 
 
@@ -287,19 +318,12 @@ def run_cli_oauth():
 
 
 def start_web_oauth(next_url=None):
-    _require_credentials_file()
-    _require_web_oauth_client()
-
     redirect_uri = get_oauth_redirect_uri()
     logger.info("Starting Gmail web OAuth with redirect_uri=%s", redirect_uri)
 
     _enable_local_insecure_transport_if_needed()
 
-    flow = Flow.from_client_secrets_file(
-        str(CREDENTIALS_PATH),
-        scopes=SCOPES,
-        redirect_uri=redirect_uri,
-    )
+    flow = _create_oauth_flow(redirect_uri)
 
     authorization_url, state = flow.authorization_url(
         access_type="offline",
