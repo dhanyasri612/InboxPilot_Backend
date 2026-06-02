@@ -88,6 +88,9 @@ def log_registered_routes() -> None:
 def on_startup():
     init_database()
     log_registered_routes()
+    oauth = gmail_client.get_oauth_config()
+    logger.info("Gmail OAuth redirect_uri: %s", oauth.get("redirectUri"))
+    logger.info("Gmail OAuth client type: %s", oauth.get("clientType"))
 
 
 class FetchRequest(BaseModel):
@@ -182,6 +185,8 @@ def gmail_status(email: str | None = Query(default=None)):
     return {
         "oauthReady": has_token,
         "credentialsConfigured": has_credentials,
+        "oauthRedirectUri": gmail_client.get_oauth_redirect_uri(),
+        "oauthClientType": gmail_client.credentials_client_type(),
         "emailAddress": profile.get("emailAddress") if profile else None,
         "lastFetch": last_fetch,
         "message": (
@@ -201,6 +206,12 @@ def gmail_profile():
 def gmail_disconnect():
     gmail_client.disconnect_gmail()
     return {"success": True}
+
+
+@app.get("/gmail/oauth/config")
+def gmail_oauth_config():
+    """Debug: exact redirect_uri sent to Google (no secrets)."""
+    return gmail_client.get_oauth_config()
 
 
 @app.get("/gmail/oauth/start")

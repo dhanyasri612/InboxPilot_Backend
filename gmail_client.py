@@ -1,12 +1,18 @@
 import base64
 import json
+import logging
 import os
 from pathlib import Path
 
+from dotenv import load_dotenv
 from google.auth.transport.requests import Request
 from google.oauth2.credentials import Credentials
 from google_auth_oauthlib.flow import Flow, InstalledAppFlow
 from googleapiclient.discovery import build
+
+load_dotenv()
+
+logger = logging.getLogger("inboxpilot.gmail")
 
 ROOT_DIR = Path(__file__).resolve().parent
 SCOPES = ["https://www.googleapis.com/auth/gmail.modify"]
@@ -15,16 +21,39 @@ CREDENTIALS_PATH = ROOT_DIR / "credentials.json"
 EMAILS_PATH = ROOT_DIR / "emails.json"
 FETCH_META_PATH = ROOT_DIR / "fetch_meta.json"
 
-OAUTH_REDIRECT_URI = os.getenv(
-    "GMAIL_OAUTH_REDIRECT_URI",
-    "http://localhost:8000/gmail/oauth/callback",
-)
 FRONTEND_URL = os.getenv("FRONTEND_URL", "http://localhost:5173")
+
+
+def resolve_oauth_redirect_uri() -> str:
+    """
+    Redirect URI sent to Google in the OAuth authorization request.
+
+    Priority:
+    1. GMAIL_OAUTH_REDIRECT_URI (explicit)
+    2. RENDER_EXTERNAL_URL + /gmail/oauth/callback (Render auto URL)
+    3. localhost default for dev
+    """
+    explicit = (os.getenv("GMAIL_OAUTH_REDIRECT_URI") or "").strip().rstrip("/")
+    if explicit:
+        return f"{explicit}/gmail/oauth/callback" if not explicit.endswith(
+            "/gmail/oauth/callback"
+        ) else explicit
+
+    render_host = (os.getenv("RENDER_EXTERNAL_URL") or "").strip().rstrip("/")
+    if render_host:
+        return f"{render_host}/gmail/oauth/callback"
+
+    return "http://localhost:8000/gmail/oauth/callback"
+
+
+def get_oauth_redirect_uri() -> str:
+    """Current redirect URI (re-read env each call for tests and hot config)."""
+    return resolve_oauth_redirect_uri()
 
 
 def _enable_local_insecure_transport_if_needed():
     """Allow OAuth over http only for local development callbacks."""
-    uri = (OAUTH_REDIRECT_URI or "").lower()
+    uri = get_oauth_redirect_uri().lower()
     if uri.startswith("http://localhost") or uri.startswith("http://127.0.0.1"):
         os.environ.setdefault("OAUTHLIB_INSECURE_TRANSPORT", "1")
 
@@ -98,7 +127,46 @@ def _require_credentials_file():
         )
 
 
-def get_fetch_options():
+def credentials_client_type() -> str | None:
+    if not CREDENTIALS_PATH.is_file() and not _credentials_json_from_env():
+        return None
+    ensure_credentials_file()
+    try:
+        data = json.loads(CREDENTIALS_PATH.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    if "web" in data:
+        return "web"
+    if "installed" in data:
+        return "installed"
+    return "unknown"
+
+
+def _require_web_oauth_client():
+    """Production browser OAuth requires a Google Web application client."""
+    client_type = credentials_client_type()
+    if client_type == "installed":
+        raise ValueError(
+            "Gmail OAuth credentials are type 'installed' (Desktop). "
+            "Production requires a Google Cloud OAuth client of type 'Web application' "
+            "with redirect URI: "
+            f"{get_oauth_redirect_uri()}. "
+            "Create a Web client, download JSON, and set GMAIL_CREDENTIALS_JSON on Render."
+        )
+    if client_type not in {"web", None} and client_type != "unknown":
+        raise ValueError(f"Unsupported OAuth credentials type: {client_type}")
+
+
+def get_oauth_config() -> dict:
+    redirect_uri = get_oauth_redirect_uri()
+    return {
+        "redirectUri": redirect_uri,
+        "clientType": credentials_client_type(),
+        "credentialsConfigured": credentials_configured(),
+        "frontendUrl": FRONTEND_URL,
+        "isLocalRedirect": redirect_uri.startswith("http://localhost")
+        or redirect_uri.startswith("http://127.0.0.1"),
+    }
     return list(FETCH_RANGES.values())
 
 
@@ -220,13 +288,17 @@ def run_cli_oauth():
 
 def start_web_oauth(next_url=None):
     _require_credentials_file()
+    _require_web_oauth_client()
+
+    redirect_uri = get_oauth_redirect_uri()
+    logger.info("Starting Gmail web OAuth with redirect_uri=%s", redirect_uri)
 
     _enable_local_insecure_transport_if_needed()
 
     flow = Flow.from_client_secrets_file(
         str(CREDENTIALS_PATH),
         scopes=SCOPES,
-        redirect_uri=OAUTH_REDIRECT_URI,
+        redirect_uri=redirect_uri,
     )
 
     authorization_url, state = flow.authorization_url(
@@ -235,8 +307,10 @@ def start_web_oauth(next_url=None):
         prompt="select_account consent",
     )
 
+    logger.info("Google authorization URL redirect_uri param: %s", redirect_uri)
+
     _oauth_states[state] = {"flow": flow, "next_url": next_url}
-    return {"authUrl": authorization_url, "state": state}
+    return {"authUrl": authorization_url, "state": state, "redirectUri": redirect_uri}
 
 
 def complete_web_oauth(state, authorization_response):
