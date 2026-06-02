@@ -30,44 +30,51 @@ logging.basicConfig(level=logging.INFO)
 
 FRONTEND_URL = os.getenv("FRONTEND_URL", "http://localhost:5173").rstrip("/")
 
-DEFAULT_CORS_ORIGINS = [
+# Always allow production + local dev (never rely on FRONTEND_URL alone).
+CORS_ALLOW_ORIGINS = [
     "https://inboxpilot-beta.vercel.app",
     "http://localhost:5173",
     "http://localhost:3000",
     "http://127.0.0.1:5173",
 ]
 
+# Preview deployments and other Vercel URLs (*.vercel.app).
+CORS_ALLOW_ORIGIN_REGEX = r"https://([a-z0-9-]+\.)*vercel\.app"
+
 
 def build_cors_origins() -> list[str]:
-    origins = list(DEFAULT_CORS_ORIGINS)
-    if FRONTEND_URL and FRONTEND_URL not in origins:
-        origins.append(FRONTEND_URL)
-
-    extra = os.getenv("CORS_ORIGINS", "")
-    for origin in extra.split(","):
+    origins = set(CORS_ALLOW_ORIGINS)
+    if FRONTEND_URL:
+        origins.add(FRONTEND_URL)
+    for origin in os.getenv("CORS_ORIGINS", "").split(","):
         cleaned = origin.strip().rstrip("/")
-        if cleaned and cleaned not in origins:
-            origins.append(cleaned)
-
-    return origins
+        if cleaned:
+            origins.add(cleaned)
+    return sorted(origins)
 
 
 CORS_ORIGINS = build_cors_origins()
 
 app = FastAPI(title="InboxPilot API", version="1.0.0")
 
+# Middleware must be registered before routes (Starlette runs last-added first).
 app.add_middleware(
     CORSMiddleware,
     allow_origins=CORS_ORIGINS,
+    allow_origin_regex=CORS_ALLOW_ORIGIN_REGEX,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
+    expose_headers=["*"],
+    max_age=600,
 )
 
 
 def log_registered_routes() -> None:
     logger.info("InboxPilot API module: backend.main:app")
-    logger.info("CORS allowed origins: %s", ", ".join(CORS_ORIGINS))
+    logger.info("CORS allow_origins: %s", ", ".join(CORS_ORIGINS))
+    logger.info("CORS allow_origin_regex: %s", CORS_ALLOW_ORIGIN_REGEX)
+    logger.info("FRONTEND_URL env: %s", FRONTEND_URL or "(not set)")
     logger.info("Registered routes:")
     for route in app.routes:
         methods = getattr(route, "methods", None)

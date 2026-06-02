@@ -7,5 +7,7 @@ services:
     envVars:
       - key: FRONTEND_URL
         value: https://inboxpilot-beta.vercel.app
+      - key: CORS_ORIGINS
+        value: https://inboxpilot-beta.vercel.app
       - key: GMAIL_OAUTH_REDIRECT_URI
         value: https://inboxpilot-backend-0dxx.onrender.com/gmail/oauth/callback
