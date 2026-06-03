@@ -39,7 +39,7 @@ def fetch_and_save_for_user(email: str, range_key: str):
     # Fetch message IDs from Gmail
     messages = gmail_client.list_message_ids(service, range_config["query"])
     # Cap total messages to 200 for sync performance
-    messages = messages[:200]
+    messages = messages
     gmail_ids = [m["id"] for m in messages]
 
     # Check database to see which ones are already present
