@@ -13,6 +13,7 @@ _EMAIL_COLUMN_PATCHES = [
     "ALTER TABLE emails ADD COLUMN IF NOT EXISTS ai_reason TEXT DEFAULT ''",
     "ALTER TABLE emails ADD COLUMN IF NOT EXISTS validation_result JSONB DEFAULT '{}'::jsonb",
     "ALTER TABLE emails ADD COLUMN IF NOT EXISTS internal_date BIGINT",
+    "ALTER TABLE emails ADD COLUMN IF NOT EXISTS application_status TEXT DEFAULT 'Discovered'",
 ]
 
 

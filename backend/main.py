@@ -16,7 +16,12 @@ if str(ROOT_DIR) not in sys.path:
 
 import gmail_client
 from backend.gmail_service import fetch_and_save_for_user
-from backend.repository import delete_emails_for_user, init_database
+from backend.repository import (
+    delete_emails_for_user,
+    get_email_by_gmail_id,
+    init_database,
+    update_email_status,
+)
 from backend.services import (
     build_daily_brief,
     build_dashboard_payload,
@@ -114,6 +119,18 @@ class BulkActionRequest(BaseModel):
 class RefreshRequest(BaseModel):
     email: EmailStr
     range: str = Field(default="all")
+
+
+class UpdateStatusRequest(BaseModel):
+    messageId: str
+    status: str
+    email: EmailStr | None = None
+
+
+class GenerateReplyRequest(BaseModel):
+    messageId: str
+    replyType: str
+    email: EmailStr | None = None
 
 
 def require_email(email: str | None) -> str:
@@ -345,6 +362,42 @@ def refresh_inbox(payload: RefreshRequest):
         }
     except Exception as error:
         raise HTTPException(status_code=500, detail=f"Refresh failed: {error}") from error
+
+
+@app.post("/emails/update-status")
+def update_email_application_status(payload: UpdateStatusRequest):
+    user_email = require_email(payload.email)
+    try:
+        record = update_email_status(user_email, payload.messageId, payload.status)
+        if not record:
+            raise HTTPException(status_code=404, detail="Email not found.")
+        return {"success": True, "messageId": payload.messageId, "status": payload.status}
+    except HTTPException:
+        raise
+    except Exception as error:
+        raise HTTPException(status_code=500, detail=f"Status update failed: {error}") from error
+
+
+@app.post("/emails/generate-reply")
+def generate_email_reply_draft(payload: GenerateReplyRequest):
+    user_email = require_email(payload.email)
+    try:
+        record = get_email_by_gmail_id(user_email, payload.messageId)
+        if not record:
+            raise HTTPException(status_code=404, detail="Email not found.")
+        
+        from backend.groq_client import generate_reply_draft
+        draft = generate_reply_draft(
+            subject=record.subject,
+            sender=record.sender,
+            body=record.body,
+            reply_type=payload.replyType,
+        )
+        return {"success": True, "draft": draft}
+    except HTTPException:
+        raise
+    except Exception as error:
+        raise HTTPException(status_code=500, detail=f"Draft generation failed: {error}") from error
 
 
 @app.post("/emails/delete")

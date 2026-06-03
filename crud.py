@@ -87,10 +87,21 @@ def delete_emails_by_gmail_ids(db: Session, user_email: str, gmail_ids: set[str]
 
 
 def replace_user_emails(db: Session, user_email: str, items: list[dict]):
-    db.query(Email).filter(Email.user_email == user_email).delete(
-        synchronize_session=False
-    )
-    db.flush()
+    # Get all gmail_ids in the items list to query database for existing entries
+    gmail_ids = [
+        item.get("id") or item.get("gmail_id")
+        for item in items
+        if item.get("id") or item.get("gmail_id")
+    ]
+    
+    existing = {}
+    if gmail_ids:
+        existing = {
+            row.gmail_id: row
+            for row in db.query(Email)
+            .filter(Email.user_email == user_email, Email.gmail_id.in_(gmail_ids))
+            .all()
+        }
 
     for item in items:
         gmail_id = item.get("id") or item.get("gmail_id")
@@ -98,35 +109,59 @@ def replace_user_emails(db: Session, user_email: str, items: list[dict]):
             continue
 
         category = item.get("category") or "Other"
-        db.add(
-            Email(
-                user_email=user_email,
-                gmail_id=gmail_id,
-                subject=item.get("subject") or "",
-                sender=item.get("sender") or "",
-                body=item.get("body") or "",
-                company=item.get("company") or "Unknown",
-                category=category,
-                subcategory=item.get("subcategory") or "",
-                confidence=int(item.get("confidence") or 0),
-                priority=int(item.get("priority") or 20),
-                deadline=item.get("deadline"),
-                deadline_detected=bool(
-                    item.get("deadlineDetected") or item.get("deadline")
-                ),
-                career_related=bool(
-                    item.get("career_related")
-                    or category in CAREER_CATEGORIES
-                ),
-                ai_category=item.get("ai_category") or "Other",
-                ai_confidence=int(item.get("ai_confidence") or 0),
-                ai_reason=item.get("ai_reason") or "",
-                validation_result=item.get("validation_result") or {},
-                summary=item.get("summary") or "",
-                internal_date=_parse_internal_date(item.get("internalDate")),
-                is_deleted=False,
+        deadline_detected = bool(item.get("deadlineDetected") or item.get("deadline"))
+        career_related = bool(item.get("career_related") or category in CAREER_CATEGORIES)
+        confidence = int(item.get("confidence") or 0)
+        priority = int(item.get("priority") or 20)
+        ai_confidence = int(item.get("ai_confidence") or 0)
+        internal_date = _parse_internal_date(item.get("internalDate"))
+
+        if gmail_id in existing:
+            email_row = existing[gmail_id]
+            email_row.subject = item.get("subject") or ""
+            email_row.sender = item.get("sender") or ""
+            email_row.body = item.get("body") or ""
+            email_row.company = item.get("company") or "Unknown"
+            email_row.category = category
+            email_row.subcategory = item.get("subcategory") or ""
+            email_row.confidence = confidence
+            email_row.priority = priority
+            email_row.deadline = item.get("deadline")
+            email_row.deadline_detected = deadline_detected
+            email_row.career_related = career_related
+            email_row.ai_category = item.get("ai_category") or "Other"
+            email_row.ai_confidence = ai_confidence
+            email_row.ai_reason = item.get("ai_reason") or ""
+            email_row.validation_result = item.get("validation_result") or {}
+            email_row.summary = item.get("summary") or ""
+            email_row.internal_date = internal_date
+            email_row.is_deleted = False
+        else:
+            db.add(
+                Email(
+                    user_email=user_email,
+                    gmail_id=gmail_id,
+                    subject=item.get("subject") or "",
+                    sender=item.get("sender") or "",
+                    body=item.get("body") or "",
+                    company=item.get("company") or "Unknown",
+                    category=category,
+                    subcategory=item.get("subcategory") or "",
+                    confidence=confidence,
+                    priority=priority,
+                    deadline=item.get("deadline"),
+                    deadline_detected=deadline_detected,
+                    career_related=career_related,
+                    ai_category=item.get("ai_category") or "Other",
+                    ai_confidence=ai_confidence,
+                    ai_reason=item.get("ai_reason") or "",
+                    validation_result=item.get("validation_result") or {},
+                    summary=item.get("summary") or "",
+                    internal_date=internal_date,
+                    is_deleted=False,
+                    application_status=item.get("applicationStatus") or "Discovered",
+                )
             )
-        )
 
     db.commit()
 
@@ -157,3 +192,11 @@ def _parse_internal_date(value):
         return int(value)
     except (TypeError, ValueError):
         return None
+
+
+def update_email_status(db: Session, user_email: str, gmail_id: str, status: str):
+    record = db.query(Email).filter(Email.user_email == user_email, Email.gmail_id == gmail_id).first()
+    if record:
+        record.application_status = status
+        db.commit()
+    return record

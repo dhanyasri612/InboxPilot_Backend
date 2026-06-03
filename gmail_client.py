@@ -1,7 +1,9 @@
 import base64
+import html
 import json
 import logging
 import os
+import re
 from pathlib import Path
 
 from dotenv import load_dotenv
@@ -94,25 +96,34 @@ def _credentials_json_from_env() -> str | None:
 
 def ensure_credentials_file() -> bool:
     """
-  Make credentials.json available for OAuth.
+    Make credentials.json available for OAuth.
 
-  On Render/Railway, set GMAIL_CREDENTIALS_JSON to the full JSON from Google Cloud
-  (single line or minified). Locally you can keep a credentials.json file instead.
+    On Render, set GMAIL_CREDENTIALS_JSON. When that env var is present it always
+    wins over an existing credentials.json (fixes stale Secret File / old deploy).
     """
+    raw = _credentials_json_from_env()
+
+    if raw:
+        try:
+            parsed = json.loads(raw)
+        except json.JSONDecodeError as error:
+            raise ValueError("GMAIL_CREDENTIALS_JSON is not valid JSON") from error
+
+        serialized = json.dumps(parsed)
+        if CREDENTIALS_PATH.is_file():
+            try:
+                if CREDENTIALS_PATH.read_text(encoding="utf-8") == serialized:
+                    return True
+            except OSError:
+                pass
+
+        CREDENTIALS_PATH.write_text(serialized, encoding="utf-8")
+        return True
+
     if CREDENTIALS_PATH.is_file():
         return True
 
-    raw = _credentials_json_from_env()
-    if not raw:
-        return False
-
-    try:
-        json.loads(raw)
-    except json.JSONDecodeError as error:
-        raise ValueError("GMAIL_CREDENTIALS_JSON is not valid JSON") from error
-
-    CREDENTIALS_PATH.write_text(raw, encoding="utf-8")
-    return True
+    return False
 
 
 def credentials_configured() -> bool:
@@ -205,21 +216,55 @@ def get_range_config(range_key):
     return FETCH_RANGES.get(range_key)
 
 
-def extract_body(payload):
-    try:
-        if "parts" in payload:
-            for part in payload["parts"]:
-                if part["mimeType"] == "text/plain":
-                    data = part["body"].get("data")
-                    if data:
-                        return base64.urlsafe_b64decode(data).decode(
-                            "utf-8",
-                            errors="ignore",
-                        )
+def clean_html_to_plain_text(html_str: str) -> str:
+    if not html_str:
+        return ""
+    # Strip script tags and content
+    text = re.sub(r"<script[^>]*?>.*?</script>", " ", html_str, flags=re.DOTALL | re.IGNORECASE)
+    # Strip style tags and content
+    text = re.sub(r"<style[^>]*?>.*?</style>", " ", text, flags=re.DOTALL | re.IGNORECASE)
+    # Strip other HTML tags
+    text = re.sub(r"<[^>]*>", " ", text)
+    # Decode HTML entities
+    text = html.unescape(text)
+    # Normalize spaces
+    text = re.sub(r"\s+", " ", text).strip()
+    return text
 
+
+def extract_body(payload):
+    def find_part(parts, mime_type):
+        for part in parts:
+            if part.get("mimeType") == mime_type:
+                data = part.get("body", {}).get("data")
+                if data:
+                    return base64.urlsafe_b64decode(data).decode("utf-8", errors="ignore")
+            if "parts" in part:
+                res = find_part(part["parts"], mime_type)
+                if res:
+                    return res
+        return None
+
+    try:
+        # 1. Try to find text/plain anywhere in nested parts
+        if "parts" in payload:
+            plain_text = find_part(payload["parts"], "text/plain")
+            if plain_text:
+                return plain_text
+            
+            # 2. Try to find text/html if text/plain is missing
+            html_text = find_part(payload["parts"], "text/html")
+            if html_text:
+                return clean_html_to_plain_text(html_text)
+
+        # 3. Fallback to main payload body
+        mime = payload.get("mimeType", "")
         data = payload.get("body", {}).get("data")
         if data:
-            return base64.urlsafe_b64decode(data).decode("utf-8", errors="ignore")
+            decoded = base64.urlsafe_b64decode(data).decode("utf-8", errors="ignore")
+            if mime == "text/html":
+                return clean_html_to_plain_text(decoded)
+            return decoded
     except Exception:
         pass
 

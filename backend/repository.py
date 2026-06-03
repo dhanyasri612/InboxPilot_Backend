@@ -61,6 +61,20 @@ def delete_emails_for_user(email: str, gmail_ids: set[str]):
     _with_db(lambda db: crud.delete_emails_by_gmail_ids(db, normalized, gmail_ids))
 
 
+def update_email_status(email: str, gmail_id: str, status: str):
+    normalized = normalize_email(email)
+    if not normalized:
+        return None
+    return _with_db(lambda db: crud.update_email_status(db, normalized, gmail_id, status))
+
+
+def get_email_by_gmail_id(email: str, gmail_id: str):
+    normalized = normalize_email(email)
+    if not normalized:
+        return None
+    return _with_db(lambda db: crud.get_email_by_gmail_id(db, normalized, gmail_id))
+
+
 def get_last_fetch_meta(email: str):
     normalized = normalize_email(email)
     if not normalized:

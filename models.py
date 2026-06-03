@@ -42,6 +42,7 @@ class Email(Base):
     ai_reason = Column(Text, default="")
     validation_result = Column(JSONB, default=dict)
     internal_date = Column(BigInteger, nullable=True, index=True)
+    application_status = Column(Text, default="Discovered")
 
     def to_api_dict(self):
         internal_date = self.internal_date
@@ -64,6 +65,7 @@ class Email(Base):
             "summary": self.summary or "",
             "body": self.body or "",
             "internalDate": str(internal_date) if internal_date is not None else None,
+            "applicationStatus": self.application_status or "Discovered",
         }
 
 

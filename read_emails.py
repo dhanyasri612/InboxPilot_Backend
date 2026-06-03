@@ -58,7 +58,8 @@ def main():
     range_config = gmail_client.get_range_config(range_key)
 
     print(f"\nFetching: {range_config['label']}...")
-    result = gmail_client.fetch_and_save_emails(range_key)
+    from backend.gmail_service import fetch_and_save_for_user
+    result = fetch_and_save_for_user(profile["emailAddress"], range_key)
 
     print("\n" + "=" * 60)
     print(f"Saved {result['count']} emails to emails.json")

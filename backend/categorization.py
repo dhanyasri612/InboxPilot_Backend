@@ -105,9 +105,11 @@ SPAM_PATTERNS = [
     r"\blottery\b",
     r"\bcrypto giveaway\b",
     r"\burgent action required\b",
-    r"\bclick here\b",
+    r"\bclick here now\b",
+    r"\bclick link below\b",
     r"\bclaim now\b",
     r"\bverify your wallet\b",
+    r"\bcongratulations you won\b",
 ]
 
 SPAM_PROMO_PATTERNS = [
@@ -147,7 +149,19 @@ VALIDATION_RULES = [
         [r"linkedin\.com", r"\bmessaged you\b", r"\bprofile views\b", r"\bconnection request\b"],
     ),
     ("Internship", [r"\binternship\b", r"\bsummer internship\b", r"\btraining program\b"]),
-    ("Interview", [r"\binterview\b", r"\bassessment\b", r"\bcoding round\b", r"\baptitude test\b"]),
+    (
+        "Interview",
+        [
+            r"\binterview (invitation|invite|schedule|round|call|process|loop|date|with|panel)\b",
+            r"\btechnical interview\b",
+            r"\bconfirm your interview\b",
+            r"\bscheduled an interview\b",
+            r"\bhr interview\b",
+            r"\bassessment\b",
+            r"\bcoding round\b",
+            r"\baptitude test\b",
+        ],
+    ),
     ("Learning", [r"udemy\.com", r"coursera\.org", r"\bcourse\b", r"\bworkshop\b", r"\bbootcamp\b"]),
     ("AI Tools", [r"\bai agents?\b", r"openai\.com", r"\bchatgpt\b", r"\bgamma\b", r"\bcopilot\b"]),
     ("Promotion", [r"spotify\.com", r"\boffer\b", r"\bpremium\b", r"\bdiscount\b", r"\bsale\b"]),
@@ -284,6 +298,35 @@ def _safe_json_load(content):
     return json.loads(cleaned)
 
 
+def clean_email_body(body: str, max_chars: int = 1000) -> str:
+    if not body:
+        return ""
+    # Strip HTML tags
+    clean = re.sub(r"<[^>]*>", " ", body)
+    # Strip URLs to avoid distracting the model and bloating tokens
+    clean = re.sub(r"https?://\S+", "", clean)
+    # Normalize excessive spaces and newlines
+    clean = re.sub(r"\s+", " ", clean).strip()
+    return clean[:max_chars]
+
+
+def parse_confidence(val) -> int:
+    if isinstance(val, (int, float)):
+        if 0 <= val <= 1:
+            return int(val * 100)
+        return int(val)
+    if isinstance(val, str):
+        try:
+            val = val.replace("%", "").strip()
+            num = float(val)
+            if 0 <= num <= 1:
+                return int(num * 100)
+            return int(num)
+        except ValueError:
+            pass
+    return 70  # default fallback
+
+
 def classify_with_groq(email, company):
     subject = email.get("subject", "")
     sender = email.get("sender", "")
@@ -301,6 +344,9 @@ def classify_with_groq(email, company):
     if not has_groq_keys():
         fallback["reason"] = "No Groq API keys configured (GROQ_API_KEY / GROQ_API_KEY1)"
         return fallback
+
+    # Clean and truncate body to conserve tokens and prevent rate limits
+    cleaned_body = clean_email_body(body, max_chars=1000)
 
     prompt = f"""
 You are an email classification engine.
@@ -350,7 +396,7 @@ Sender:
 {sender}
 
 Body:
-{body}
+{cleaned_body}
 """
 
     try:
@@ -373,7 +419,7 @@ Body:
             )
         return fallback
 
-    confidence = data.get("confidence") if isinstance(data.get("confidence"), int) else 0
+    confidence = parse_confidence(data.get("confidence"))
     category = normalize_category(data.get("category"))
 
     return {
@@ -394,10 +440,11 @@ def validate_classification(email, ai_result):
     confidence = ai_result.get("confidence", 0)
     text = f"{subject} {body} {sender_text}"
 
-    if ai_result.get("failed") or confidence < 60:
-        if spam_signal_score(email) >= 45:
-            return {"applied": True, "category": "Spam", "reason": "Spam heuristic override"}
+    # Always override to Spam if the spam heuristic score is high, regardless of AI confidence
+    if spam_signal_score(email) >= 45:
+        return {"applied": True, "category": "Spam", "reason": "Spam heuristic override"}
 
+    if ai_result.get("failed") or confidence < 60:
         for category, patterns in VALIDATION_RULES:
             for pattern in patterns:
                 if re.search(pattern, text, flags=re.IGNORECASE):
@@ -406,8 +453,39 @@ def validate_classification(email, ai_result):
     return {"applied": False, "category": ai_result.get("category", "Other"), "reason": "Kept AI result"}
 
 
-def derive_priority(category):
-    return PRIORITY_BY_CATEGORY.get(category, PRIORITY_BY_CATEGORY["Other"])
+def derive_priority(category, email=None, ai_confidence=70):
+    base = PRIORITY_BY_CATEGORY.get(category, PRIORITY_BY_CATEGORY["Other"])
+    if not email:
+        return base
+
+    subject = normalize_text(email.get("subject", ""))
+    body = normalize_text(email.get("body", ""))
+    text = f"{subject} {body}"
+    
+    boost = 0
+    
+    # 1. Boost for upcoming deadlines (Urgent)
+    deadline_info = detect_deadline(email)
+    if deadline_info.get("deadlineDetected"):
+        boost += 15
+        
+    # 2. Boost/Deboost for critical career keywords
+    if category in {"Job", "Internship", "Interview"}:
+        text_lower = text.lower()
+        if any(w in text_lower for w in ["offer", "selected", "shortlisted", "hired", "congratulations"]):
+            boost += 15
+        elif any(w in text_lower for w in ["next steps", "schedule", "call", "urgent", "action required"]):
+            boost += 10
+        elif any(w in text_lower for w in ["reject", "regret", "not moving forward", "unsuccessful"]):
+            boost -= 15
+
+    # 3. Boost based on AI confidence
+    if ai_confidence >= 90:
+        boost += 5
+    elif ai_confidence < 70:
+        boost -= 5
+
+    return max(1, min(99, base + boost))
 
 
 def build_subcategory(email, classification):
@@ -422,19 +500,123 @@ def build_subcategory(email, classification):
     return f"{company} {classification.get('category', 'Other')}".strip()[:80]
 
 
+def classify_with_heuristics(email, company):
+    """
+    Check if we can classify the email with high confidence using rule-based heuristics,
+    completely bypassing the Groq AI model call.
+    """
+    subject = normalize_text(email.get("subject", ""))
+    body = normalize_text(email.get("body", ""))
+    sender = normalize_text(email.get("sender", ""))
+    text = f"{subject} {body} {sender}"
+    
+    # 1. Spam High Confidence Heuristic
+    if spam_signal_score(email) >= 45:
+        return {
+            "company": company or "Unknown",
+            "category": "Spam",
+            "subcategory": "Spam Alert",
+            "reason": "Spam heuristic high confidence match",
+            "confidence": 95,
+            "failed": False,
+            "heuristic": True
+        }
+        
+    # 2. Security Alerts (very common)
+    security_patterns = [
+        r"accounts\.google\.com",
+        r"\bsecurity alert\b",
+        r"\bpassword reset\b",
+        r"\bverification code\b",
+        r"\bsign-in alert\b",
+        r"\bnew login\b",
+        r"\bsuspicious activity\b",
+        r"\bconfirm your account\b",
+        r"\bverify your email\b"
+    ]
+    if any(re.search(pat, text) for pat in security_patterns):
+        return {
+            "company": company or "Unknown",
+            "category": "Security",
+            "subcategory": "Security Alert",
+            "reason": "Security heuristic match",
+            "confidence": 95,
+            "failed": False,
+            "heuristic": True
+        }
+
+    # 3. Social & Networking
+    social_patterns = [
+        r"linkedin\.com",
+        r"facebookmail\.com",
+        r"twitter\.com",
+        r"instagram\.com",
+        r"\bconnection request\b",
+        r"\bmessaged you\b",
+        r"\bnew follower\b"
+    ]
+    if any(re.search(pat, text) for pat in social_patterns):
+        category = "Networking" if "linkedin.com" in text or "connection" in text else "Social"
+        return {
+            "company": company or "Unknown",
+            "category": category,
+            "subcategory": "Social Notification",
+            "reason": "Social heuristic match",
+            "confidence": 90,
+            "failed": False,
+            "heuristic": True
+        }
+
+    # 4. Newsletters (Unsubscribe link present + informational keywords)
+    if "unsubscribe" in body and any(k in subject for k in ["newsletter", "digest", "weekly", "daily", "roundup", "update"]):
+        return {
+            "company": company or "Unknown",
+            "category": "Newsletter",
+            "subcategory": "Weekly Digest",
+            "reason": "Newsletter heuristic match",
+            "confidence": 90,
+            "failed": False,
+            "heuristic": True
+        }
+
+    return None
+
+
 def categorize_email(email):
     company = extract_company(email)
-    ai_result = classify_with_groq(email, company)
+    
+    # Try Heuristics First
+    heuristic_result = classify_with_heuristics(email, company)
+    if heuristic_result:
+        ai_result = heuristic_result
+    else:
+        ai_result = classify_with_groq(email, company)
+        
     validation = validate_classification(email, ai_result)
     final_category = ai_result.get("category", "Other")
 
-    if ai_result.get("failed") or ai_result.get("confidence", 0) < 60:
-        if validation.get("applied"):
-            final_category = validation["category"]
+    # Apply validation if the validation category is Spam (always overrides) 
+    # or if AI failed or has low confidence
+    if validation.get("applied") and (
+        validation.get("category") == "Spam"
+        or ai_result.get("failed")
+        or ai_result.get("confidence", 0) < 60
+    ):
+        final_category = validation["category"]
+
     if final_category not in ALLOWED_CATEGORIES:
         final_category = "Other"
 
     deadline_info = detect_deadline(email)
+    
+    # Filter/clean deadline based on final category to prevent false-positives
+    # (e.g. login dates in Security/Account/Social emails being marked as deadlines)
+    if final_category in {"Security", "Account", "Social", "Networking", "Support", "Product Updates", "Notifications", "Other", "Spam"}:
+        strong_deadline_keywords = [r"\bdeadline\b", r"\bdue\b", r"\bexpire\b", r"\bapply\b", r"\bcutoff\b"]
+        text_to_check = normalize_text(f"{email.get('subject', '')} {email.get('body', '')}")
+        if not any(re.search(kw, text_to_check) for kw in strong_deadline_keywords):
+            deadline_info = {"deadline": "", "deadlineDetected": False}
+
     career_related = final_category in CAREER_CATEGORIES
     confidence = ai_result.get("confidence", 0)
     if validation.get("applied") and validation.get("category") != ai_result.get("category"):
@@ -452,7 +634,7 @@ def categorize_email(email):
             {"company": company, "category": final_category, "subcategory": ai_result.get("subcategory", "")},
         ),
         "confidence": max(0, min(100, confidence)),
-        "priority": derive_priority(final_category),
+        "priority": derive_priority(final_category, email, confidence),
         "deadline": deadline_info["deadline"],
         "deadlineDetected": deadline_info["deadlineDetected"],
         "career_related": career_related,
@@ -613,40 +795,49 @@ def analyze_emails(emails, debug=False):
     results = []
 
     if debug:
-        print("\nAnalyzing emails...\n")
+        print("\nAnalyzing emails in parallel...\n")
 
-    for email in emails:
+    from concurrent.futures import ThreadPoolExecutor
+
+    def process_email(email):
         try:
             classification = categorize_email(email)
             if debug:
                 print_debug(email, classification)
 
-            results.append(
-                {
-                    "id": email.get("id"),
-                    "subject": email.get("subject", ""),
-                    "sender": email.get("sender", ""),
-                    "company": classification["company"],
-                    "category": classification["category"],
-                    "subcategory": classification.get("subcategory", ""),
-                    "confidence": classification["confidence"],
-                    "priority": classification["priority"],
-                    "deadline": classification["deadline"],
-                    "deadlineDetected": classification.get("deadlineDetected", False),
-                    "career_related": classification.get("career_related", False),
-                    "ai_category": classification.get("ai_category", "Other"),
-                    "ai_confidence": classification.get("ai_confidence", 0),
-                    "ai_reason": classification.get("ai_reason", ""),
-                    "validation_result": classification.get("validation_result", {}),
-                    "summary": classification["summary"],
-                    "body": email.get("body", ""),
-                    "internalDate": email.get("internalDate"),
-                }
-            )
+            return {
+                "id": email.get("id"),
+                "subject": email.get("subject", ""),
+                "sender": email.get("sender", ""),
+                "company": classification["company"],
+                "category": classification["category"],
+                "subcategory": classification.get("subcategory", ""),
+                "confidence": classification["confidence"],
+                "priority": classification["priority"],
+                "deadline": classification["deadline"],
+                "deadlineDetected": classification.get("deadlineDetected", False),
+                "career_related": classification.get("career_related", False),
+                "ai_category": classification.get("ai_category", "Other"),
+                "ai_confidence": classification.get("ai_confidence", 0),
+                "ai_reason": classification.get("ai_reason", ""),
+                "validation_result": classification.get("validation_result", {}),
+                "summary": classification["summary"],
+                "body": email.get("body", ""),
+                "internalDate": email.get("internalDate"),
+            }
         except Exception as error:
             if debug:
                 print(f"Error processing: {email.get('subject', '')}")
                 print(error)
+            return None
+
+    # Run AI classifications with 5 parallel workers
+    with ThreadPoolExecutor(max_workers=5) as executor:
+        futures = [executor.submit(process_email, email) for email in emails]
+        for fut in futures:
+            res = fut.result()
+            if res:
+                results.append(res)
 
     return results
 
